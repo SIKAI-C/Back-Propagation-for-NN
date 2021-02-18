@@ -1,0 +1,589 @@
+import gzip
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+import _pickle as cPickle
+
+
+
+############
+### DATA ###
+############
+
+# load the data
+def load_data():
+    f = gzip.open("mnist.pkl.gz","rb")
+    training_data,validation_data,test_data = cPickle.load(f,encoding="latin1")
+    f.close()
+    return (training_data,validation_data,test_data)
+
+# vectorize y: transform an integer to a 1-k hot indicator
+def vectorizeY(k):
+    a = np.zeros((10,1))
+    a[k] = 1.0
+    return a
+
+# reshape the dataset
+def reshapeData():
+    TrainData,ValidationData,TestData = load_data()
+    TrainX = [np.reshape(x,(784,1)) for x in TrainData[0]]
+    TrainY = [vectorizeY(y) for y in TrainData[1]]
+    TrainingData = list(zip(TrainX,TrainY))
+    ValidationX = [np.reshape(x,(784,1)) for x in ValidationData[0]]
+    ValidationY = [vectorizeY(y) for y in ValidationData[1]]
+    ValidingData = list(zip(ValidationX,ValidationY))
+    TestX = [np.reshape(x,(784,1)) for x in TestData[0]]
+    TestY = [vectorizeY(y) for y in TestData[1]]
+    TestingData = list(zip(TestX,TestY))
+    return (TrainingData,ValidingData,TestingData)
+
+
+
+#############
+### BPNN ####
+#############
+
+class BPNN:
+    # define the class Back-Propagation Neural Network (BPNN)
+    # the parameters: 
+    #   "Input": the input data; "Output": the estimation
+    #   "Nodes": a list. 
+    #            its length equal to the number of layers.
+    #            the numbers is the number of nodes in the corresponding layer
+    #   "ActivationFunction": "sigmoid", "tanh", or "relu". choose the activation function used in the BP
+    #   "learningRate": the learning rate/step size
+    #   "Cost":  "MSE" or "CE". choose the cost function used in BP
+    #   "Regularization": "T/F" use the L2 regularization or not
+    #   "SGD": [epochs,minibatchSize]
+
+    def __init__(self,TrainData,ValidationData,TestData,Nodes,ActivationFunction="sigmoid",learningRate=0.01,Cost="MSE",Regularization=0,SGD=[30,50]):
+        self.train = TrainData
+        self.validation = ValidationData
+        self.test = TestData
+        self.Nodes = Nodes
+        self.ActivationFunction = ActivationFunction
+        self.learningRate = learningRate
+        self.Cost = Cost
+        self.Regularization = Regularization
+        self.SGD = SGD
+        self.NumberLayers = len(self.Nodes)      # the number of the layers except the input layer
+        # initialize the weights and bias
+        self.bias = [np.random.randn(i,1)*0.1 for i in Nodes[1:]]
+        self.weight = [np.random.randn(j,i)/np.sqrt(i) for i,j in zip(Nodes[:-1],Nodes[1:])]
+        # record the real-time accuracy of the training data, validation data, and testing data
+        self.accuracyTrain = []
+        self.accuracyValid = []
+        self.accuracyTest = []
+
+    # define activation functions
+    def sigmoid(self,x,derivative=False):
+        if derivative:
+            return self.sigmoid(x)*(1.0-self.sigmoid(x))
+        else:
+            return 1.0/(1.0+np.exp(-x))
+
+    def tanh(self,x,derivative=False):
+        if derivative:
+            return np.square(2/(np.exp(x)+np.exp(-x)))
+        else:
+            return (np.exp(x)-np.exp(-x))/(np.exp(x)+np.exp(-x))
+
+    def relu(self,x,derivative=False):
+        if derivative:
+            x[(x>0)] = 1.0
+            x[(x<=0)] = 0.0
+            return x
+        else:
+            x[(x<=0)] = 0.0
+            return x
+        
+    def activation(self,x,derivative=False):
+        if self.ActivationFunction == "sigmoid":
+            return self.sigmoid(x,derivative)
+        if self.ActivationFunction == "tanh":
+            return self.tanh(x,derivative)
+        if self.ActivationFunction == "relu":
+            return self.relu(x,derivative)
+        else:
+            print("the activation function is invalid")
+
+    
+    # define the back propagation
+    def backPropagation(self,x,y):
+        updateBias = [np.zeros(b.shape) for b in self.bias]
+        updateWeight = [np.zeros(w.shape) for w in self.weight]
+        layersInput = []    # record the output of each layer
+        layersOutput = []   # record the input of each layer
+        outputs = x
+        layersOutput.append(outputs)
+        # forward propagation and record the inputs and outputs of each layers
+        for b,w in zip(self.bias,self.weight):
+            inputs = np.dot(w,outputs)+b
+            layersInput.append(inputs)
+            outputs = self.activation(inputs)
+            layersOutput.append(outputs)
+        # calculate the errors between the estimations and the y
+        errors = self.InitialDerivative(layersInput[-1],layersOutput[-1],y,CostType=self.Cost)
+        updateBias[-1] = errors
+        updateWeight[-1] = np.dot(errors,layersOutput[-2].T)
+        # backforward update the bias and weight
+        for l in range(2,self.NumberLayers):
+            derivativeActivation = self.activation(layersInput[-l],derivative=True)
+            errors = np.dot(self.weight[-l+1].T,errors)*derivativeActivation
+            updateBias[-l] = errors
+            updateWeight[-l] = np.dot(errors,layersOutput[-l-1].T)
+        # return the updating information
+        return (updateBias,updateWeight)
+
+    
+    # define cost functions and their derivative
+    def InitialDerivative(self,a,z,y,CostType):
+        if CostType == "MSE":
+            return (z-y)*self.activation(a,derivative=True)
+        if CostType == "CE":
+            return (z-y)
+        else:
+            print("the cost function is invalid")
+
+    
+    # update the weight and bias in each miniBatch
+    def updateMiniBatch(self,MiniBatch):
+        Bias = [np.zeros(b.shape) for b in self.bias]
+        Weight = [np.zeros(w.shape) for w in self.weight]
+        # update the weight and bias
+        for x,y in MiniBatch:
+            updateBias,updateWeight = self.backPropagation(x,y)
+            Bias = [b+ub for b,ub in zip(Bias,updateBias)]
+            Weight = [w+uw for w,uw in zip(Weight,updateWeight)]
+        # update the self.weight and self.bias
+        r = self.learningRate
+        lbd = self.Regularization/10  
+        self.weight = [(1-lbd)*sw-(r/len(MiniBatch))*w for sw,w in zip(self.weight,Weight)]
+        self.bias = [(1-lbd)*sb-(r/len(MiniBatch))*b for sb,b in zip(self.bias,Bias)]
+
+    
+    # use the updateMiniBatch() function to achieve the SGD
+    def gradientDescent(self):
+        epochs = self.SGD[0]
+        lenMiniBatch = self.SGD[1]
+        traindata = self.train
+        for i in range(epochs):
+            random.shuffle(traindata)
+            MiniBatches = [traindata[k:(k+lenMiniBatch)] for k in range(0,len(traindata),lenMiniBatch)]
+            for MiniBatch in MiniBatches:
+                self.updateMiniBatch(MiniBatch)
+            print("Epoch {0} complete".format(i+1))
+            trainAccuracy = self.accuracy(dataset="Train")
+            validAccuracy = self.accuracy(dataset="Valid")
+            testAccuracy = self.accuracy(dataset="Test")
+            self.accuracyTrain.append(trainAccuracy)
+            self.accuracyValid.append(validAccuracy)
+            self.accuracyTest.append(testAccuracy)
+            print("Training accuracy is {0}, Validation accuracy is {1}".format(trainAccuracy,validAccuracy))
+
+
+    # define the estimate() function to return the estimation of y based on x, w, and b
+    def estimate(self,x):
+        for w,b in zip(self.weight,self.bias):
+            a = np.dot(w,x)+b
+            x = self.activation(a)
+        estimation = np.argmax(x)
+        return estimation
+    
+    # define the accuracy() function to calculate the accuracy rate
+    def accuracy(self,dataset="Train"):
+        data = self.train
+        if dataset == "Valid":
+            data = self.validation
+        if dataset == "Test":
+            data = self.test
+        results = [(self.estimate(x),np.argmax(y)) for (x,y) in data]
+        accuracyRate = sum(int(x==y) for (x,y) in results)/len(data)
+        return accuracyRate
+
+
+
+##################
+### Validation ###
+##################
+
+# the Number of Hidden Layers
+# compare the performances between NNs with different number of hidden layers
+# decide the number of hidden layers used in the later validation
+# in the process other parameters are setted as the default value
+def resultHiddenLayers(sgd=[30,50]):
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=sgd)
+    b = BPNN(tr,va,te,[784,50,50,10],SGD=sgd)
+    print("1 hidden layer, 50 nodes in the hidden layer, sigmoid, MSE, learningrate=0.01, regularization=0")
+    a.gradientDescent()
+    print("2 hidden layers, 50 nodes in each hidden layer, sigmoid, MSE, learningrate=0.01, regularization=0")
+    b.gradientDescent()
+    len_epoches = sgd[0]
+    Epoches = list(range(1,(len_epoches+1)))
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="1 hidden layer")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="2 hidden layers")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="1 hidden layer")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="2 hidden layers")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# the Number of Hidden Nodes
+# compare the performances of different number of hidden nodes
+# based on the aforementioned, in this testing, we use NN with one hidden layers
+# to handle the complex model with larger number of hidden nodes we choose SGD=[100,50]
+# other paramters will be setted as the default values
+def resultHiddenNodes():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[100,50])
+    b = BPNN(tr,va,te,[784,60,10],SGD=[100,50])
+    c = BPNN(tr,va,te,[784,70,10],SGD=[100,50])
+    d = BPNN(tr,va,te,[784,80,10],SGD=[100,50])
+    e = BPNN(tr,va,te,[784,90,10],SGD=[100,50])
+    f = BPNN(tr,va,te,[784,100,10],SGD=[100,50])
+    Epoches = list(range(1,101))
+    a.gradientDescent()
+    b.gradientDescent()
+    c.gradientDescent()
+    d.gradientDescent()
+    e.gradientDescent()
+    f.gradientDescent()
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    trainaccuracy_3 = c.accuracyTrain
+    validaccuracy_3 = c.accuracyValid
+    trainaccuracy_4 = d.accuracyTrain
+    validaccuracy_4 = d.accuracyValid
+    trainaccuracy_5 = e.accuracyTrain
+    validaccuracy_5 = e.accuracyValid
+    trainaccuracy_6 = f.accuracyTrain
+    validaccuracy_6 = f.accuracyValid
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="number of nodes = 50")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="number of nodes = 60")
+    plt.plot(Epoches,trainaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="number of nodes = 70")
+    plt.plot(Epoches,trainaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="number of nodes = 80")
+    plt.plot(Epoches,trainaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="number of nodes = 90")
+    plt.plot(Epoches,trainaccuracy_6,color="m",linestyle="-",marker="^",linewidth=1,label="number of nodes = 100")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="number of nodes = 50")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="number of nodes = 60")
+    plt.plot(Epoches,validaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="number of nodes = 70")
+    plt.plot(Epoches,validaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="number of nodes = 80")
+    plt.plot(Epoches,validaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="number of nodes = 90")
+    plt.plot(Epoches,validaccuracy_6,color="m",linestyle="-",marker="^",linewidth=1,label="number of nodes = 100")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# the epoches and minibatch size
+# epoches = 50 is a sufficient number of epoches
+# Nodes = [784,50,10]
+# in this testing, I will choose the different size of minibatch and compare the performances
+def resultMinibatchSize():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[50,50])
+    b = BPNN(tr,va,te,[784,50,10],SGD=[50,60])
+    c = BPNN(tr,va,te,[784,50,10],SGD=[50,70])
+    d = BPNN(tr,va,te,[784,50,10],SGD=[50,80])
+    e = BPNN(tr,va,te,[784,50,10],SGD=[50,90])
+    f = BPNN(tr,va,te,[784,50,10],SGD=[50,100])
+    Epoches = list(range(1,51))
+    a.gradientDescent()
+    b.gradientDescent()
+    c.gradientDescent()
+    d.gradientDescent()
+    e.gradientDescent()
+    f.gradientDescent()
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    trainaccuracy_3 = c.accuracyTrain
+    validaccuracy_3 = c.accuracyValid
+    trainaccuracy_4 = d.accuracyTrain
+    validaccuracy_4 = d.accuracyValid
+    trainaccuracy_5 = e.accuracyTrain
+    validaccuracy_5 = e.accuracyValid
+    trainaccuracy_6 = f.accuracyTrain
+    validaccuracy_6 = f.accuracyValid
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 50")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 60")
+    plt.plot(Epoches,trainaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 70")
+    plt.plot(Epoches,trainaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 80")
+    plt.plot(Epoches,trainaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 90")
+    plt.plot(Epoches,trainaccuracy_6,color="m",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 100")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 50")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 60")
+    plt.plot(Epoches,validaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 70")
+    plt.plot(Epoches,validaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 80")
+    plt.plot(Epoches,validaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 90")
+    plt.plot(Epoches,validaccuracy_6,color="m",linestyle="-",marker="^",linewidth=1,label="Size of Minibatch = 100")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# the Cost
+# compare the performances of NN with MSE and Cross-Entropy as the cost function
+# choose the best one and use in later other testings
+# accorrding to the previous testing, SGD=[50,50], Nodes=[784,50,10]
+# other parameters will be setted as the default values
+def resultCost():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="MSE")
+    b = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE")
+    a.gradientDescent()
+    b.gradientDescent()
+    Epoches = list(range(1,51))
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="MSE")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="Cross-Entropy")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="MSE")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="Cross-Entropy")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# the activation
+# compare the performances of NNs with "sigmoid", "relu", and "tanh" as their activation function
+# SGD=[50,50], Nodes=[784,50,10], Cost="CE" 
+def resultActivation():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="sigmoid")
+    b = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="tanh")
+    c = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu")
+    a.gradientDescent()
+    b.gradientDescent()
+    c.gradientDescent()
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    trainaccuracy_3 = c.accuracyTrain
+    validaccuracy_3 = c.accuracyValid
+    Epoches = list(range(1,51))
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="Activation function is sigmoid")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="Activation function is tanh")
+    plt.plot(Epoches,trainaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="Activation function is relu")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="Activation function is sigmoid")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="Activation function is tanh")
+    plt.plot(Epoches,validaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="Activation function is relu")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# the learning rate
+# compare the performance of NNs with different learning rate (0.001, 0.01, 0.1, 1.0, or 3.0)
+# SGD=[50,50], Nodes=[784,50,10], Cost="CE", ActicationFunction="relu", 
+def resultLearningRate():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.001)
+    b = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.01)
+    c = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1)
+    d = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=1.0)
+    e = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=3.0)
+    Epoches = list(range(1,51))
+    a.gradientDescent()
+    b.gradientDescent()
+    c.gradientDescent()
+    d.gradientDescent()
+    e.gradientDescent()
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    trainaccuracy_3 = c.accuracyTrain
+    validaccuracy_3 = c.accuracyValid
+    trainaccuracy_4 = d.accuracyTrain
+    validaccuracy_4 = d.accuracyValid
+    trainaccuracy_5 = e.accuracyTrain
+    validaccuracy_5 = e.accuracyValid
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="learning rate = 0.001")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="learning rate = 0.01")
+    plt.plot(Epoches,trainaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="learning rate = 0.1")
+    plt.plot(Epoches,trainaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="learning rate = 1.0")
+    plt.plot(Epoches,trainaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="learning rate = 3.0")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="learning rate = 0.001")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="learning rate = 0.01")
+    plt.plot(Epoches,validaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="learning rate = 0.1")
+    plt.plot(Epoches,validaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="learning rate = 1.0")
+    plt.plot(Epoches,validaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="learning rate = 3.0")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# Regularization
+# compare the performance of NNs with different lambda (0.0, 0.01, 0.05, 0.1, 1.0)
+# SGD=[50,50], Nodes=[784,50,10], Cost="CE", ActicationFunction="relu", learning rate = 
+def resultRegularization():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1,Regularization=0.0)
+    b = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1,Regularization=0.01)
+    c = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1,Regularization=0.05)
+    d = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1,Regularization=0.1)
+    e = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1,Regularization=1.0)
+    Epoches = list(range(1,51))
+    a.gradientDescent()
+    b.gradientDescent()
+    c.gradientDescent()
+    d.gradientDescent()
+    e.gradientDescent()
+    trainaccuracy_1 = a.accuracyTrain
+    validaccuracy_1 = a.accuracyValid
+    trainaccuracy_2 = b.accuracyTrain
+    validaccuracy_2 = b.accuracyValid
+    trainaccuracy_3 = c.accuracyTrain
+    validaccuracy_3 = c.accuracyValid
+    trainaccuracy_4 = d.accuracyTrain
+    validaccuracy_4 = d.accuracyValid
+    trainaccuracy_5 = e.accuracyTrain
+    validaccuracy_5 = e.accuracyValid
+    # the first plot: training accuracy versus epoches
+    plt.figure(1) 
+    plt.plot(Epoches,trainaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="lambda = 0.0")
+    plt.plot(Epoches,trainaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="lambda = 0.01")
+    plt.plot(Epoches,trainaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="lambda = 0.05")
+    plt.plot(Epoches,trainaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="lambda = 0.1")
+    plt.plot(Epoches,trainaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="lambda = 1.0")
+    plt.xlabel("Epoches")
+    plt.ylabel("Training Accuracy")
+    plt.legend() 
+    plt.title("Training Accuracy vs. Epoches")
+    # the second plot: validation accuracy versus epoches
+    plt.figure(2)
+    plt.plot(Epoches,validaccuracy_1,color="r",linestyle="-",marker="^",linewidth=1,label="lambda = 0.0")
+    plt.plot(Epoches,validaccuracy_2,color="b",linestyle="-",marker="^",linewidth=1,label="lambda = 0.01")
+    plt.plot(Epoches,validaccuracy_3,color="y",linestyle="-",marker="^",linewidth=1,label="lambda = 0.05")
+    plt.plot(Epoches,validaccuracy_4,color="g",linestyle="-",marker="^",linewidth=1,label="lambda = 0.1")
+    plt.plot(Epoches,validaccuracy_5,color="k",linestyle="-",marker="^",linewidth=1,label="lambda = 1.0")
+    plt.xlabel("Epoches")
+    plt.ylabel("Validation Accuracy")
+    plt.legend() 
+    plt.title("Validation Accuracy vs. Epoches")
+    plt.show()
+
+# use the best NN to estimate the test data
+def testing():
+    tr,va,te = reshapeData()
+    a = BPNN(tr,va,te,[784,50,10],SGD=[50,50],Cost="CE",ActivationFunction="relu",learningRate=0.1,Regularization=0.0)
+    a.gradientDescent()
+    testaccuracy = a.accuracyTest
+    Epoches = list(range(1,51))
+    plt.plot(Epoches,testaccuracy,color="b",linestyle="-",marker="^",linewidth=1,label="testing")
+    plt.xlabel("Epoches")
+    plt.ylabel("Testing Accuracy")
+    plt.legend() 
+    plt.title("Testing Accuracy vs. Epoches")
+    plt.show()
+
+
+##############
+### OUTPUT ###
+##############
+if __name__ == "__main__":
+    # the Number of Hidden Layers
+    resultHiddenLayers()
+    resultHiddenLayers(sgd=[50,50])
+    resultHiddenLayers(sgd=[100,50])
+    # by drawing the plots, it is found that the estimate accuracy of NN with one hidden layer is high enough
+    # the NN with two hidden layers can also achieve such high accuracy but requires more epoches
+    # takeing into account the limitted computing resources, the NN with only one hidden layers will be used in subsequent testing
+
+    # the Number of Hidden Nodes
+    resultHiddenNodes()
+    # from the plot we draw in this section, it is found that the number of nodes actually has a weak effect on the output
+    # considering the computational costs, we use 50 nodes in the later testings
+    # another fact is that, when the epoch is greater than or equal to 50, the increase in accuracy is not significant
+    # epoches = 50 is a great sub-optimal choice with the limited computational sources
+
+    # the epoches and minibatch size
+    resultMinibatchSize()
+    # I will use 50 as size of minibatch
+
+    # the Cost
+    resultCost()
+    # choose the cross-entropy
+
+    # the activation
+    resultActivation()
+    # use relu activation function
+
+    # the learning rate
+    resultLearningRate()
+    # learning rate = 0.1
+
+    # Regularization
+    resultRegularization()
+    # Regularization = 0.0
+
+    # testing
+    testing()
+
